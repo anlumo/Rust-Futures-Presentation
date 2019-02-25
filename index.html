@@ -4,10 +4,10 @@
 		<meta charset="utf-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 
-		<title>reveal.js</title>
+		<title>Futures in Rust 2019</title>
 
 		<link rel="stylesheet" href="css/reveal.css">
-		<link rel="stylesheet" href="css/theme/black.css">
+		<link rel="stylesheet" href="css/theme/night.css">
 
 		<!-- Theme used for syntax highlighting of code -->
 		<link rel="stylesheet" href="lib/css/zenburn.css">
@@ -24,8 +24,349 @@
 	<body>
 		<div class="reveal">
 			<div class="slides">
-				<section>Slide 1</section>
-				<section>Slide 2</section>
+				<section><h2>Futures in Rust 2019</h2>
+					<h4>Andreas Monitzer @anlumo1</h4>
+					<img src="future.gif" alt="Future" width="33%">
+					<h4>Rust Meetup Vienna 2019-02-26</h4>
+				</section>
+				<section>
+					<h3>Plan</h3>
+					<ol>
+						<li>Asynchronous Operations</li>
+						<li>Concept Behind Futures</li>
+						<li>How to Use Futures</li>
+						<li>Async/Await</li>
+					</ol>
+				</section>
+				<section>
+					<h3>Operations</h3>
+					<ul>
+						<li>A database query</li>
+						<li>An RPC invocation</li>
+						<li>A timeout</li>
+						<li>A long-running CPU-intensive task</li>
+						<li>Reading bytes from a file descriptor</li>
+					</ul>
+					<aside class="notes">The operations this talk is about. File descriptor also means network operations.</aside>
+				</section>
+				<section>
+					<h3>Synchronous Operations</h3>
+					<pre><code data-trim>
+						use std::fs::File;
+
+						let mut f = File::open("foo.txt")?;
+						let mut buffer = Vec::new();
+						f.read_to_end(&mut buffer)?;
+					</code></pre>
+					<aside class="notes">
+						What Rust does today.<br>
+						Each operation blocks execution.
+					</aside>
+				</section>
+				<section>
+					<h3>Multithreading</h3>
+					<img src="multithreading.png" alt="Multithreading"><br>
+					<code>std::sync::mpsc::channel</code>
+					<aside class="notes">
+						Multi-producer, single-consumer FIFO queue communication primitives
+					</aside>
+				</section>
+				<section>
+					<h3>Asynchronous Programming</h3>
+					<img src="traditional-server-vs-NGINX-worker.png" width="50%" alt="NGINX workers">
+				</section>
+				<section>
+					<h3>Why?</h3>
+					<img src="memory_usage.png" width="100%" alt="Memory usage">
+				</section>
+				<section>
+					<h3>Rust History With Asynchronous Programming</h3>
+					<p><a href="https://github.com/rust-lang/rfcs/pull/230">Green Threads</a></p>
+					<aside class="notes">
+						<ul>
+							<li>“Early on, Rust had a “green threading” model, not unlike Go’s. You could spin up a large number of lightweight tasks, which were then scheduled onto real OS threads (sometimes called “M:N threading”). In the green threading model, a function like read_exact blocks the current task, but not the underlying OS thread”</li>
+							<li>Removed due to not having a runtime any more</li>
+						</ul>
+					</aside>
+				</section>
+				<section>
+					<h3><code>futures::future::Future</code></h3>
+					<ul>
+						<li>nightly: <code>std::future::Future</code>
+						<pre><code>#![feature(futures_api)]</code></pre></li>
+						<li>Zero-cost!</li>
+					</ul>
+					<aside class="notes">
+						Rust 2018!<br>
+						Explain meaning of zero-cost.
+					</aside>
+				</section>
+				<section>
+					<pre><code data-trim>
+						pub trait Future {
+						  type Output;
+						  fn poll(self: Pin&lt;&amp;mut Self>, lw: &amp;LocalWaker) -> Poll&lt;Self::Output>;
+						}
+					</code></pre>
+					<pre><code data-trim>
+						pub enum Poll&lt;T> {
+						  Ready(T),
+						  Pending,
+						}
+					</code></pre>
+					<aside class="notes">
+						<ul>
+							<li>That's all there is to it in the standard library!</li>
+							<li>futures crate Futures have an error type as well, but this was offloaded to <code>Result</code>.</li>
+							<li>Explain Pin</li>
+							<li>A LocalWaker is a handle for waking up a task by notifying its executor that it is ready to be run.</li>
+							<li>A Future can also be dropped while the operation is still ongoing when the result is no longer relevant.</li>
+						</ul>
+						</aside>
+				</section>
+				<section>
+					<pre><code data-trim>
+						let future: impl Future&lt;Result&lt;TcpStream>&#x200b;> = TcpStream::connect("127.0.0.1");
+
+						run(future); // or: spawn(future);
+					</code></pre>
+					<aside class="notes">
+						<ul>
+							<li>Most basic form of using a Future.</li>
+							<li>Doesn't actually work that way, because run expects a <code>Future&lt;()></code>.</li>
+							<li>Busy loop is bad!</li>
+							<li>Explain concept of an executor.</li>
+							<li>Difference run/spawn.</li>
+						</ul>
+					</aside>
+				</section>
+				<section>
+					<h3>Executor</h3>
+					<pre><code data-trim>
+						fn&lt;F: Future&lt;()>&#x200b;> run(future: F) {
+						  while future.poll() == Poll&lt;()>::Pending {
+						    // busy loop
+						  }
+						}
+					</code></pre>
+					<aside class="notes">
+						Idea behind running a Future.
+					</aside>
+				</section>
+				<section>
+					<pre><code data-trim>
+						struct&lt;'a> Waker(&'a MyExecutor);
+
+						impl LocalWaker for Waker {
+						  fn wake(&self) {
+						    self.0.wake = true;
+						  }
+						}
+					</code></pre>
+					<pre><code data-trim>
+						struct MyExecutor {
+						  wake: bool,
+						}
+						impl MyExecutor {
+						  pub fn&lt;F: Future&lt;()>&#x200b;> run(future: F) {
+						    self.wake = false;
+
+						    while future.poll(&Waker(&self)) == Poll&lt;()>::Pending {
+						      // block until self.wake == true
+						      self.wake = false;
+						    }
+						  }
+						}
+					</code></pre>
+					<aside class="notes">
+						blocking is actually done via a mutex<br>
+						A Future has to ensure that there's a way awake will be called! Otherwise it will hang forever.
+					</aside>
+				</section>
+				<section>
+					<!-- https://rufflewind.com/img/rust-futures-cheatsheet.html -->
+					<h3>Future Combinators</h3>
+					<pre><code data-trim>
+						fn Future::then(Future&lt;T, E>, FnOnce(Result&lt;T, E>) -> IntoFuture&lt;U, F>) -> Future&lt;U, F>
+					</code></pre>
+					<aside class="notes">
+						<ul>
+							<li>This is for the old futures crate and so has the error baked in!</li>
+							<li>Can't find these for std::future::Future, probably because they're not needed for async/await.</li>
+						</ul>
+					</aside>
+				</section>
+				<section>
+					<pre><code data-trim>
+						fn Future::and_then(Future&lt;T, E>, FnOnce(T) -> IntoFuture&lt;U, E>) -> Future&lt;U, E>
+					</code></pre>
+				</section>
+				<section>
+					<pre><code data-trim>
+						fn Future::map(Future&lt;T, E>, FnOnce(T) -> U) -> Future&lt;U, E>
+					</code></pre>
+				</section>
+				<section>
+					<pre><code data-trim>
+						fn Future::map_err(Future&lt;T, E>, FnOnce(E) -> F) -> Future&lt;T, F>
+					</code></pre>
+				</section>
+				<section>
+					<pre><code data-trim>
+						fn join_all(IntoIterator&lt;IntoFuture&lt;T, E>>) -> Future&lt;Vec&lt;T>, E>
+					</code></pre>
+				</section>
+				<section>
+					<h3>Streams</h3>
+					<blockquote>“If Future is an asynchronous version of Result, then Stream is an asynchronous version of Iterator. A stream represents a sequence of value-producing events that occur asynchronously to the caller.”
+					</blockquote>
+					<aside class="notes">
+						futures::stream::Stream documentation
+					</aside>
+				</section>
+				<section>
+					<h3>Tokio</h3>
+					<ul>
+						<li>Most common executor</li>
+						<li><a href="https://tokio.rs">https://tokio.rs</a></li>
+						<li>Rich ecosystem</li>
+					</ul>
+				</section>
+				<section>
+					<h3>Tokio (cont'd)</h3>
+					<ul>
+						<li>A reactor backed by the operating system’s event queue (epoll, kqueue, IOCP, etc…).</li>
+						<li>Asynchronous TCP and UDP sockets.</li>
+						<li>A multithreaded, work-stealing based task scheduler.</li>
+					</ul>
+					<aside class="notes">
+						<ul>
+							<li>Reactor is the event loop handler itself. Executor is the code that handles distributing the work load.</li>
+							<li>Rust is in the rare position to be able to handle multithreading automatically. No need for special care about this (but see demo code later). Usually, only functional languages can do that.</li>
+						</ul>
+					</aside>
+				</section>
+				<section>
+					<h3>Multithreaded, Work-stealing Based Task Scheduler</h3>
+					<img src="task_scheduler.svg" alt="Task Scheduler Diagram">
+				</section>
+				<section>
+					<h3>Alternatives</h3>
+					<ul>
+						<li><a href="https://docs.rs/embedded-executor/0.2.2/embedded_executor/">embedded_executor</a></li>
+						<li><a href="https://github.com/Nemo157/embrio-rs">embrio-rs</a></li>
+						<li><a href="https://rustwasm.github.io/wasm-bindgen/api/wasm_bindgen_futures/">wasm-bindgen-futures</a></li>
+					</ul>
+					<aside class="notes">
+						No documentation for embrio-rs at all!
+					</aside>
+				</section>
+				<section>
+					<h3>The Woes of Futures</h3>
+					<img src="typical_error.png" alt="Typical Errors">
+				</section>
+				<section>
+					<pre style="font-size: 0.45em;">
+						<code data-trim>
+							error[E0277]: the trait bound `(): futures::future::Future` is not satisfied
+							--> src\main.rs:42:38
+							   |
+							42 |         let future = client.get(uri).and_then(|response| {
+							   |                                      ^^^^^^^^ the trait `futures::future::Future` is not implemented for `()`
+							   |
+							   = note: required because of the requirements on the impl of `futures::future::IntoFuture` for `()`
+							   = note: required because of the requirements on the impl of `futures::future::Future` for
+							   	`futures::stream::for_each::ForEach&lt;hyper::body::body::Body,
+							   		[closure@src\main.rs:47:43: 52:14 loaded:_, total:_, cursor:_, idx:_], ()>`
+						</code>
+					</pre>
+					<aside class="notes">
+						Fix: Closure has to return a Future.
+					</aside>
+				</section>
+				<section>
+					<h3>async/await</h3>
+					<ul>
+						<li>Writing asynchronous code is hard</li>
+					</ul>
+					<pre><code data-trim>
+						let buf = String::from("foobar");
+						let future = TcpStream::connect("127.0.0.1")
+							.and_then(|c| c.write(buf))
+							.and_then(|c| c.read())
+							.and_then(|(c, b)| b == "barfoo");
+						tokio::run(future);
+						println!("{}", buf); // doesn't work
+					</code></pre>
+					<aside class="notes">
+						<ul>
+							<li>Buf has to be moved to the Future, because its tied to that Future's lifetime, so you can't use it in your function any more.</li>
+							<li>Also, it's hard to read.</li>
+						</ul>
+					</aside>
+				</section>
+				<section>
+					<h3>async/await (cont'd)</h3>
+					<ul>
+						<li>nightly-only for now</li>
+						<li>Highly unstable!</li>
+						<li>New keyword: <code>async</code></li>
+						<li>New macro: <code>await!</code></li>
+						<li><pre style="width: auto;"><code>#![feature(await_macro, async_await, futures_api)]</code></pre></li>
+					</ul>
+				</section>
+				<section>
+					<pre><code data-trim>
+						let buf = String::from("foobar");
+						let future = TcpStream::connect("127.0.0.1")
+							.and_then(|c| c.write(buf))
+							.and_then(|c| c.read())
+							.and_then(|(c, b)| b == "barfoo");
+					</code></pre>
+					<pre class="fragment fade-in"><code data-trim>
+						let future = async {
+						  let buf = String::from("foobar");
+						  let c = await!(TcpStream::connect("127.0.0.1"));
+						  await!(c.write(buf));
+						  let b = await!(c.read());
+						  b == barfoo
+						};
+					</code></pre>
+					<aside class="notes">
+						Above and below code are the same, basically.<br>
+						The compiler turns the second version into a state machine that contains the steps between await points and the data that has to be held between the two states.
+					</aside>
+				</section>
+				<section>
+					<pre><code data-trim>
+						fn async check_foobar() -> impl Future {
+						  let buf = String::from("foobar");
+						  let c = await!(TcpStream::connect("127.0.0.1"));
+						  await!(c.write(buf));
+						  let b = await!(c.read());
+						  b == barfoo
+						};
+					</code></pre>
+					<aside class="notes">
+						That's how an asynchronous function looks like.
+					</aside>
+				</section>
+				<section>
+					<h1>Demo</h1>
+				</section>
+				<section>
+					<h3>References</h3>
+					<ul>
+						<li><a href="https://rufflewind.com/img/rust-futures-cheatsheet.html">Futures Cheat Sheet</a></li>
+						<li><a href="https://www.youtube.com/watch?v=9_3krAQtD2k">The What and How of Futures and async/await in Rust</a> (4h video!)</li>
+						<li><a href="https://www.youtube.com/watch?v=K_wnB9ibCMg">An Async Story. Katharina Fey</a> (<a href="https://rustrush.ru/">Rust Rush 2018</a> presentation)</li>
+						<li><a href="https://doc.rust-lang.org/std/future/trait.Future.html">std::future::Future documentation</a></li>
+						<li><a href="https://tokio.rs/">Tokio.rs homepage</a></li>
+					</ul>
+					<aside class="notes">
+						Most of these are outdated already! The basic concepts still apply, though.
+					</aside>
+				</section>
 			</div>
 		</div>
 
@@ -37,12 +378,16 @@
 			// - https://github.com/hakimel/reveal.js#configuration
 			// - https://github.com/hakimel/reveal.js#dependencies
 			Reveal.initialize({
+				width: 1280,
+				height: 720,
 				dependencies: [
 					{ src: 'plugin/markdown/marked.js' },
 					{ src: 'plugin/markdown/markdown.js' },
 					{ src: 'plugin/notes/notes.js', async: true },
 					{ src: 'plugin/highlight/highlight.js', async: true, callback: function() { hljs.initHighlightingOnLoad(); } }
-				]
+				],
+				history: true,
+				showSlideNumber: 'speaker',
 			});
 		</script>
 	</body>
