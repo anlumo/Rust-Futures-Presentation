@@ -1,0 +1,17 @@
+[package]
+name = "downloader"
+version = "0.1.0"
+authors = ["Andreas Monitzer <andreas@monitzer.com>"]
+edition = "2018"
+
+[dependencies]
+rustop="1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_derive = "1.0"
+tokio = "0.1"
+tokio-io = "0.1"
+hyper = "0.12"
+headers = "0.2"
+hyper-rustls = "0.16"
+crossterm = "0.6"
